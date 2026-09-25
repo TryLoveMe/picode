@@ -1,0 +1,27 @@
+{
+  "name": "picode",
+  "version": "1.0.0",
+  "description": "PiCode — a Codex-style desktop GUI for the pi coding agent (badlogic/pi-mono). Bundles pi itself; no Node.js, WSL or terminal required.",
+  "main": "build/main.js",
+  "license": "MIT",
+  "author": "PiCode",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "dev": "npm run build && electron .",
+    "smoke:rpc": "node scripts/smoke-rpc.mjs",
+    "test:e2e": "node scripts/e2e.mjs",
+    "dist": "npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "0.73.1"
+  },
+  "devDependencies": {
+    "dompurify": "^3.2.4",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.28.2",
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.12"
+  }
+}

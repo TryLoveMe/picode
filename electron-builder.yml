@@ -1,0 +1,26 @@
+appId: dev.picode.desktop
+productName: PiCode
+copyright: MIT licensed; bundles the pi coding agent (badlogic/pi-mono, MIT)
+directories:
+  output: release
+  buildResources: build
+files:
+  - package.json
+  - build/**/*
+asarUnpack:
+  - node_modules/**
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: ${productName}-Setup-${version}.${ext}
+nsis:
+  oneClick: true
+  perMachine: false
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: always
+  shortcutName: PiCode
