@@ -48,4 +48,9 @@ await build({
 fs.copyFileSync(r('src/renderer/index.html'), r('build/renderer/index.html'));
 fs.copyFileSync(r('src/renderer/style.css'), r('build/renderer/style.css'));
 
+// Bundled MCP extension is loaded by pi via jiti (TypeScript on disk, not bundled).
+fs.rmSync(r('build/mcp-extension'), { recursive: true, force: true });
+fs.mkdirSync(r('build/mcp-extension'), { recursive: true });
+fs.copyFileSync(r('src/mcp-extension/index.ts'), r('build/mcp-extension/index.ts'));
+
 console.log('build done');

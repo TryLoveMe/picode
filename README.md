@@ -41,6 +41,8 @@ PiCode 通过 pi 官方的 **RPC 模式**驱动一个**真正的、完整内嵌�
   - pi 的**扩展命令、提示模板、技能**（`/skill:name`）由 `get_commands` 动态获取、原样透传给 pi 执行
   - `!命令` 直接运行 shell，输出进入对话上下文（等价 pi 的 `!` 前缀）
 - **模型与思考等级**：可搜索选择器（`Ctrl+P`）、思考等级切换、一键设为默认
+- **双栏设置页**：左侧分类导航 + 右侧详情 —— 通用（主题 / 行为 / 关于）、模型（API 密钥、默认模型、可用模型列表、默认思考等级）、MCP、技能、扩展、高级
+- **MCP 支持**：内置打包的 MCP 桥接扩展，把任意 stdio MCP 服务器的工具接入 pi；设置 → MCP 中增删改查服务器（配置格式与 Claude Desktop 的 `mcpServers` 兼容），保存后自动重连，状态栏实时显示「已连接服务器 / 工具数」；会话内可用 `/mcp` 查看状态、`/mcp-reload` 手动重载
 - **会话管理**：按项目列出历史会话（与命令行版互通）、切换 / 删除 / 分叉 / 克隆 / 重命名 / 导出 HTML / 分支树
 - **上下文与用量**：上下文水位条、token / 费用统计、自动压缩开关、压缩与重试事件提示
 - **扩展 UI 全支持**：扩展弹出的 select / confirm / input / editor 对话框、notify 通知、状态条、widget、窗口标题、编辑器预填
@@ -71,16 +73,20 @@ picode/
 │   │   ├── main.ts     # 窗口、IPC、生命周期
 │   │   ├── rpc.ts      # pi RPC 桥（严格 JSONL 分帧、请求关联、超时）
 │   │   ├── sessions.ts # 会话索引 + 分支树解析（get_tree 降级）
-│   │   └── config.ts   # pi 配置读写（auth.json / settings.json）
+│   │   ├── resources.ts# 技能 / 扩展目录扫描（设置页清单）
+│   │   └── config.ts   # pi 配置读写（auth.json / settings.json / mcp.json）
+│   ├── mcp-extension/  # 内置 MCP 桥接扩展（pi 通过 jiti 直接加载）
 │   ├── preload/        # contextBridge 桥接
 │   └── renderer/       # Codex 风格前端（原生 TS，无框架）
 │       ├── app.ts      # 聊天 / 流式渲染 / 斜杠面板 / 全部对话框
 │       ├── markdown.ts # marked + highlight.js + DOMPurify
 │       └── style.css   # 主题（深/浅色 CSS 变量）
 ├── scripts/
-│   ├── build.mjs       # esbuild 打包主进程/preload/渲染层
+│   ├── build.mjs       # esbuild 打包主进程/preload/渲染层 + 复制 MCP 扩展
 │   ├── make-icons.mjs  # 纯 JS 生成 PNG/ICO 图标
 │   ├── smoke-rpc.mjs   # 对内嵌 pi 的协议冒烟测试
+│   ├── demo-mcp-server.mjs # 演示用 stdio MCP 服务器（测试 MCP 扩展）
+│   ├── test-mcp-extension.mjs # MCP 扩展端到端测试（真实 pi RPC 模式）
 │   ├── mock-llm.mjs    # Anthropic Messages 协议的 mock 模型
 │   └── e2e.mjs         # Electron 端到端测试（CDP 驱动 + 截图）
 └── electron-builder.yml

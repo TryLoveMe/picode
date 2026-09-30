@@ -53,6 +53,35 @@ export function writeSettings(patch: Record<string, any>): any {
   return merged;
 }
 
+// ---------- MCP (bundled extension config/status) ----------
+export function mcpExtensionPath(): string {
+  // build/main.js → build/mcp-extension/index.ts (copied by the build script;
+  // unpacked from the asar in the packaged app so jiti can load it).
+  const p = path.join(__dirname, 'mcp-extension', 'index.ts');
+  return p.replace('app.asar', 'app.asar.unpacked');
+}
+
+export function readMcpConfig(): any {
+  const cfg = readJson(path.join(agentDir(), 'mcp.json'));
+  return cfg && typeof cfg === 'object' ? cfg : { mcpServers: {} };
+}
+
+export function writeMcpConfig(cfg: any): any {
+  const servers = cfg?.mcpServers && typeof cfg.mcpServers === 'object' ? cfg.mcpServers : {};
+  const clean: Record<string, any> = {};
+  for (const [name, c] of Object.entries(servers)) {
+    if (!c || typeof c !== 'object' || !(c as any).command) continue;
+    clean[name] = c;
+  }
+  const out = { ...readMcpConfig(), mcpServers: clean };
+  writeJson(path.join(agentDir(), 'mcp.json'), out);
+  return out;
+}
+
+export function readMcpStatus(): any {
+  return readJson(path.join(agentDir(), 'mcp-status.json')) || null;
+}
+
 export function readAuth(): any {
   return readJson(path.join(agentDir(), 'auth.json')) || {};
 }

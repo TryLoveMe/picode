@@ -10,6 +10,8 @@ import { startMockLlm } from './mock-llm.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'dist-e2e');
 const PORT = 8712;
+// Escaped path of the demo MCP server, embeddable in browser-eval JS strings.
+const E2E_MCP_SERVER_ESC = JSON.stringify(path.join(ROOT, 'scripts', 'demo-mcp-server.mjs')).slice(1, -1);
 const CDP_PORT = 9223;
 
 fs.rmSync(OUT, { recursive: true, force: true });
@@ -239,11 +241,43 @@ try {
   });
   await closeAllModals(cdp);
 
-  await step('打开设置（密钥管理可见）', async () => {
+  await step('打开设置（左侧导航 + 右侧详情）', async () => {
     await ev(cdp, `document.getElementById('btn-settings').click(); 1`);
     await wait(cdp, `[...document.querySelectorAll('.modal .m-title')].some(n => n.textContent === '设置')`, 8000, '设置弹窗');
+    await wait(cdp, `document.querySelectorAll('.st-nav-item').length >= 6`, 8000, '设置导航项');
+    await wait(cdp, `!!document.querySelector('.settings-detail .st-section')`, 8000, '通用页内容');
   });
   await shot(cdp, '05-settings.png');
+  await step('设置：模型页（密钥 + 模型浏览器）', async () => {
+    await ev(cdp, `[...document.querySelectorAll('.st-nav-item')].find(n => n.textContent.includes('模型')).click(); 1`);
+    await wait(cdp, `[...document.querySelectorAll('.settings-detail .model-item')].length > 0`, 10000, '模型列表');
+    await wait(cdp, `[...document.querySelectorAll('.settings-detail .key-row')].length > 0 || document.querySelector('.settings-detail')?.innerText.includes('尚未配置')`, 8000, '密钥区');
+  });
+  await shot(cdp, '05b-settings-model.png');
+  await step('设置：MCP 页（服务器列表 + 添加表单）', async () => {
+    await ev(cdp, `[...document.querySelectorAll('.st-nav-item')].find(n => n.textContent.includes('MCP')).click(); 1`);
+    await wait(cdp, `document.querySelector('.settings-detail')?.innerText.includes('MCP 扩展')`, 8000, 'MCP 页');
+    await ev(cdp, `[...document.querySelectorAll('.settings-detail button')].find(b => b.textContent.includes('添加服务器')).click(); 1`);
+    await wait(cdp, `!!document.querySelector('.settings-detail .st-form')`, 5000, 'MCP 表单');
+    await ev(cdp, `(() => {
+      const form = document.querySelector('.settings-detail .st-form');
+      const inputs = form.querySelectorAll('input');
+      inputs[0].value = 'demo';
+      inputs[1].value = 'node';
+      form.querySelector('textarea').value = '${E2E_MCP_SERVER_ESC}';
+      return 1;
+    })()`);
+    await ev(cdp, `[...document.querySelectorAll('.settings-detail button')].find(b => b.textContent.includes('保存并重载')).click(); 1`);
+    await wait(cdp, `[...document.querySelectorAll('.settings-detail .mcp-row')].some(r => r.textContent.includes('demo'))`, 8000, 'MCP 服务器行');
+  });
+  await shot(cdp, '05c-settings-mcp.png');
+  await step('设置：技能 / 扩展 / 高级页可切换', async () => {
+    for (const label of ['技能', '扩展', '高级']) {
+      await ev(cdp, `[...document.querySelectorAll('.st-nav-item')].find(n => n.textContent.includes('${label}')).click(); 1`);
+      await wait(cdp, `document.querySelectorAll('.settings-detail .st-section').length > 0`, 8000, label + ' 页内容');
+    }
+  });
+  await shot(cdp, '05d-settings-skills.png');
   await closeAllModals(cdp);
 
   await step('! 前缀直接运行 shell 命令', async () => {

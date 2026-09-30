@@ -9,6 +9,7 @@ files:
   - build/**/*
 asarUnpack:
   - node_modules/**
+  - build/mcp-extension/**
 win:
   target:
     - target: nsis

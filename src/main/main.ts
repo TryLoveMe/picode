@@ -9,11 +9,16 @@ import {
   bundledCliPath,
   clearProviderKey,
   maskAuth,
+  mcpExtensionPath,
   piVersion,
+  readMcpConfig,
+  readMcpStatus,
   readSettings,
   setProviderKey,
+  writeMcpConfig,
   writeSettings,
 } from './config';
+import { listExtensions, listSkills } from './resources';
 
 app.setName('PiCode');
 
@@ -99,6 +104,7 @@ ipcMain.handle('picode:app-info', () => ({
   platform: process.platform,
   agentDir: agentDir(),
   cliPath: bundledCliPath(),
+  mcpExtensionPath: mcpExtensionPath(),
   home: app.getPath('home'),
 }));
 
@@ -176,6 +182,15 @@ ipcMain.handle('pi-config:clear-key', (_e, provider: string) => {
   return maskAuth();
 });
 ipcMain.handle('pi-config:write-settings', (_e, patch: Record<string, any>) => writeSettings(patch));
+
+// MCP extension config/status (shared with the bundled pi extension via files)
+ipcMain.handle('mcp:config-read', () => readMcpConfig());
+ipcMain.handle('mcp:config-write', (_e, cfg: any) => writeMcpConfig(cfg));
+ipcMain.handle('mcp:status-read', () => readMcpStatus());
+
+// pi resource inventory (skills / extension files on disk)
+ipcMain.handle('resources:list-skills', (_e, cwd?: string) => listSkills(cwd));
+ipcMain.handle('resources:list-extensions', (_e, cwd?: string) => listExtensions(cwd));
 
 ipcMain.handle('diag:log', () => ({
   stderr: rpc.lastStderr,

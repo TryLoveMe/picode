@@ -29,6 +29,15 @@ contextBridge.exposeInMainWorld('picode', {
   configClearKey: (provider: string) => invoke('pi-config:clear-key', provider),
   configWriteSettings: (patch: any) => invoke('pi-config:write-settings', patch),
 
+  // MCP extension config/status
+  mcpConfigRead: () => invoke('mcp:config-read'),
+  mcpConfigWrite: (cfg: any) => invoke('mcp:config-write', cfg),
+  mcpStatusRead: () => invoke('mcp:status-read'),
+
+  // pi resource inventory
+  skillsList: (cwd?: string) => invoke('resources:list-skills', cwd),
+  extensionsList: (cwd?: string) => invoke('resources:list-extensions', cwd),
+
   // diagnostics
   diagLog: () => invoke('diag:log'),
 

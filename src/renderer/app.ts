@@ -760,6 +760,9 @@ async function startPi(cwd: string, sessionPath?: string | null): Promise<void> 
 
   const extraArgs: string[] = [];
   if (S.prefs.trustProject) extraArgs.push('--approve');
+  if (S.prefs.mcpEnabled !== false && S.appInfo?.mcpExtensionPath) {
+    extraArgs.push('--extension', S.appInfo.mcpExtensionPath);
+  }
   try {
     await api.piStart({ cwd, sessionPath: sessionPath || null, extraArgs });
   } catch (e: any) {
@@ -779,7 +782,7 @@ async function startPi(cwd: string, sessionPath?: string | null): Promise<void> 
         applyState(resp.data);
         await refreshAll();
         if (!S.models.length) {
-          renderBanner('还没有可用的模型。点击右侧「设置」配置 API 密钥后，用 /model 选择模型。', true);
+          renderBanner('还没有可用的模型。打开「设置 → 模型」配置 API 密钥后，用 /model 选择模型。', true);
         }
         return;
       }
@@ -808,7 +811,7 @@ function renderBanner(message: string | null, warning = false): void {
     const btn = el('button', { class: 'btn small', text: '重启 pi', onclick: () => startPi(S.project!, S.sessionFile) });
     banner.append(btn);
   } else {
-    const btn = el('button', { class: 'btn small', text: '打开设置', onclick: () => openSettings() });
+    const btn = el('button', { class: 'btn small', text: '打开设置', onclick: () => openSettings('model') });
     banner.append(btn);
   }
   zone.append(banner);
@@ -1172,8 +1175,8 @@ const BUILTINS: Builtin[] = [
   { name: 'clone', desc: '复制当前会话为副本', run: () => doClone() },
   { name: 'tree', desc: '查看会话分支树', run: () => openTreeModal() },
   { name: 'export', desc: '导出会话为 HTML', run: () => doExport() },
-  { name: 'extensions', desc: '查看已加载的扩展 / 模板 / 技能', run: () => openExtensionsModal() },
-  { name: 'settings', desc: '打开设置（密钥 / 默认模型 / 外观）', run: () => openSettings() },
+  { name: 'extensions', desc: '查看已加载的扩展 / 模板 / 技能', run: () => openSettings('extensions') },
+  { name: 'settings', desc: '打开设置（模型 / MCP / 技能 / 扩展）', run: () => openSettings() },
   { name: 'reload', desc: '重启 pi（重新加载配置与扩展）', run: () => doReload() },
   { name: 'quit', desc: '退出 PiCode', run: () => window.close() },
 ];
@@ -1431,16 +1434,19 @@ function promptModal(title: string, label: string, initial = ''): Promise<string
   });
 }
 
-// ---------- model picker ----------
-async function openModelPicker(): Promise<void> {
+// ---------- model browser (shared by picker modal and settings MODEL tab) ----------
+async function buildModelBrowser(): Promise<{ root: HTMLElement; refresh: () => Promise<void> }> {
   await refreshModels();
-  const { body, close } = baseModal('选择模型', true);
+  const root = el('div');
   const search = el('input', { type: 'text', class: 'search-box', placeholder: '搜索模型（名称 / 供应商）…' }) as HTMLInputElement;
   const listEl = el('div');
-  body.append(search, listEl);
-  const settings = await api.configRead();
-  const defKey = settings?.settings?.defaultProvider && settings?.settings?.defaultModel
-    ? `${settings.settings.defaultProvider}/${settings.settings.defaultModel}` : null;
+  root.append(search, listEl);
+  let defKey: string | null = null;
+  try {
+    const settings = await api.configRead();
+    defKey = settings?.settings?.defaultProvider && settings?.settings?.defaultModel
+      ? `${settings.settings.defaultProvider}/${settings.settings.defaultModel}` : null;
+  } catch { /* ignore */ }
 
   const render = () => {
     listEl.innerHTML = '';
@@ -1450,7 +1456,6 @@ async function openModelPicker(): Promise<void> {
     if (!S.models.length) {
       listEl.append(el('div', { class: 'p-empty' },
         el('div', { text: '没有可用模型 — 大多数供应商需要先配置 API 密钥。' }),
-        el('button', { class: 'btn', style: 'margin-top:10px', text: '打开设置配置密钥', onclick: () => { close(); openSettings(); } }),
       ));
       return;
     }
@@ -1487,6 +1492,7 @@ async function openModelPicker(): Promise<void> {
           e.stopPropagation();
           try {
             await api.configWriteSettings({ defaultProvider: m.provider, defaultModel: m.id });
+            defKey = `${m.provider}/${m.id}`;
             toast(`已设为默认: ${m.provider}/${m.id}`, 'success');
             render();
           } catch (err: any) {
@@ -1499,7 +1505,25 @@ async function openModelPicker(): Promise<void> {
   };
   search.oninput = render;
   render();
-  setTimeout(() => search.focus(), 50);
+  return {
+    root,
+    refresh: async () => {
+      try {
+        const settings = await api.configRead();
+        defKey = settings?.settings?.defaultProvider && settings?.settings?.defaultModel
+          ? `${settings.settings.defaultProvider}/${settings.settings.defaultModel}` : null;
+      } catch { /* ignore */ }
+      render();
+    },
+  };
+}
+
+// ---------- model picker ----------
+async function openModelPicker(): Promise<void> {
+  const { body } = baseModal('选择模型', true);
+  const { root } = await buildModelBrowser();
+  body.append(root);
+  setTimeout(() => (body.querySelector('.search-box') as HTMLInputElement)?.focus(), 50);
 }
 
 // ---------- thinking picker ----------
@@ -1753,35 +1777,6 @@ function openHelp(): void {
   }
 }
 
-// ---------- extensions ----------
-function openExtensionsModal(): void {
-  const { body } = baseModal('扩展 / 模板 / 技能', true);
-  if (!S.commands.length) {
-    body.append(el('div', { class: 'form-hint', text: '当前没有加载任何扩展命令、提示模板或技能。' }));
-  }
-  const groups = new Map<string, any[]>();
-  for (const c of S.commands) {
-    const tag = c.source === 'skill' ? '技能（/skill:name）' : c.source === 'prompt' ? '提示模板' : '扩展命令';
-    if (!groups.has(tag)) groups.set(tag, []);
-    groups.get(tag)!.push(c);
-  }
-  for (const [tag, cmds] of groups) {
-    body.append(el('h4', { style: 'font-size:12px;color:var(--text-faint);margin:12px 0 6px', text: tag }));
-    for (const c of cmds) {
-      const src = c.sourceInfo?.path || '';
-      body.append(el('div', { class: 'key-row' },
-        el('span', { class: 'k-provider', text: `/${c.name}` }),
-        el('span', { style: 'flex:1;font-size:12px;color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: c.description || src }),
-        el('span', { class: 'k-ok', text: c.sourceInfo?.scope === 'project' ? '项目' : '用户' }),
-      ));
-    }
-  }
-  const foot = el('div', { class: 'modal-foot' },
-    el('button', { class: 'btn', text: '打开 pi 配置目录', onclick: () => api.openPath(S.appInfo.agentDir) }),
-  );
-  body.append(foot);
-}
-
 // ---------- settings ----------
 const KEY_PROVIDERS: [string, string][] = [
   ['anthropic', 'Anthropic（Claude）'],
@@ -1804,17 +1799,177 @@ const KEY_PROVIDERS: [string, string][] = [
   ['opencode', 'OpenCode'],
 ];
 
-async function openSettings(): Promise<void> {
-  const { body, close } = baseModal('设置', true);
+type SettingsTab = 'general' | 'model' | 'mcp' | 'skills' | 'extensions' | 'advanced';
+
+interface SettingsTabCtx {
+  setBadge: (tab: SettingsTab, text: string) => void;
+  refresh: () => Promise<void>;
+}
+
+const ST_TABS: { id: SettingsTab; label: string; icon: string }[] = [
+  {
+    id: 'general', label: '通用',
+    icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  },
+  {
+    id: 'model', label: '模型',
+    icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="2.5" stroke="currentColor" stroke-width="1.3"/><rect x="6" y="6" width="4" height="4" rx="1" fill="currentColor"/><path d="M6 2.5v-1M10 2.5v-1M6 14.5v-1M10 14.5v-1M2.5 6h-1M2.5 10h-1M14.5 6h-1M14.5 10h-1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+  },
+  {
+    id: 'mcp', label: 'MCP',
+    icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M5.5 2v3.5M10.5 2v3.5M4 5.5h8v3a4 4 0 0 1-8 0v-3zM8 12.5v1.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="8.4" r="1.1" fill="currentColor"/></svg>',
+  },
+  {
+    id: 'skills', label: '技能',
+    icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.5c-1.2-.9-2.9-1-4.5-.6-.6.1-1 .6-1 1.2v9c0 .8.7 1.3 1.5 1.2 1.4-.2 2.8 0 4 1 1.2-1 2.6-1.2 4-1 .8.1 1.5-.4 1.5-1.2v-9c0-.6-.4-1.1-1-1.2-1.6-.4-3.3-.3-4.5.6zM8 2.5v11.8" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  },
+  {
+    id: 'extensions', label: '扩展',
+    icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M6.5 2.5a1.5 1.5 0 0 1 3 0V4h2a.9.9 0 0 1 .9.9v2h1.1a1.5 1.5 0 0 1 0 3h-1.1v2a.9.9 0 0 1-.9.9h-2v-1.1a1.5 1.5 0 0 0-3 0v1.1h-2a.9.9 0 0 1-.9-.9v-2H2.5a1.5 1.5 0 0 1 0-3h1.1v-2A.9.9 0 0 1 4.5 4h2V2.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>',
+  },
+  {
+    id: 'advanced', label: '高级',
+    icon: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  },
+];
+
+function stSection(title: string, sub?: string): HTMLElement {
+  const sec = el('div', { class: 'st-section' });
+  sec.append(el('h4', { text: title }));
+  if (sub) sec.append(el('div', { class: 'st-sub', text: sub }));
+  return sec;
+}
+
+function stFormRow(label: string, control: HTMLElement): HTMLElement {
+  return el('div', { class: 'form-row' }, el('label', { text: label }), control);
+}
+
+function openSettings(initialTab: SettingsTab = 'general'): void {
+  const mask = el('div', { class: 'modal-mask' });
+  const modal = el('div', { class: 'modal settings-modal' });
+  const head = el('div', { class: 'modal-head' }, el('div', { class: 'm-title', text: '设置' }));
+  const closeBtn = el('button', { class: 'modal-close', text: '✕' });
+  head.append(closeBtn);
+  const layout = el('div', { class: 'settings-layout' });
+  const nav = el('div', { class: 'settings-nav' });
+  const detail = el('div', { class: 'settings-detail' });
+  layout.append(nav, detail);
+  modal.append(head, layout);
+  mask.append(modal);
+  $('modal-root').append(mask);
+  modalStack++;
+  const close = () => {
+    mask.remove();
+    modalStack--;
+  };
+  closeBtn.onclick = close;
+  mask.onmousedown = (e) => {
+    if (e.target === mask) close();
+  };
+
+  let activeTab: SettingsTab = initialTab;
+  let switching = 0;
+  const navItems = new Map<SettingsTab, HTMLElement>();
+
+  const setBadge = (tab: SettingsTab, text: string): void => {
+    const item = navItems.get(tab);
+    if (!item) return;
+    let b = item.querySelector('.n-badge') as HTMLElement | null;
+    if (!text) { b?.remove(); return; }
+    if (!b) { b = el('span', { class: 'n-badge' }); item.append(b); }
+    b.textContent = text;
+  };
+
+  const builders: Record<SettingsTab, (ctx: SettingsTabCtx) => Promise<HTMLElement>> = {
+    general: () => generalTab(),
+    model: (ctx) => modelTab(ctx),
+    mcp: (ctx) => mcpTab(ctx),
+    skills: (ctx) => skillsTab(ctx),
+    extensions: (ctx) => extensionsTab(ctx),
+    advanced: () => advancedTab(),
+  };
+
+  const switchTab = async (tab: SettingsTab): Promise<void> => {
+    activeTab = tab;
+    for (const [id, node] of navItems) node.classList.toggle('active', id === tab);
+    const seq = ++switching;
+    detail.innerHTML = '';
+    detail.append(el('div', { class: 'dim', style: 'padding:24px;font-size:12.5px', text: '加载中…' }));
+    let node: HTMLElement;
+    try {
+      node = await builders[tab]({ setBadge, refresh: () => switchTab(activeTab) });
+    } catch (err: any) {
+      node = el('div', { class: 'p-empty', text: `加载失败：${err?.message || err}` });
+    }
+    if (seq !== switching || activeTab !== tab) return;
+    detail.innerHTML = '';
+    detail.append(node);
+  };
+
+  for (const t of ST_TABS) {
+    const item = el('div', { class: 'st-nav-item' },
+      el('span', { class: 'n-ico', html: t.icon }),
+      el('span', { class: 'n-label', text: t.label }),
+    );
+    item.onclick = () => switchTab(t.id);
+    navItems.set(t.id, item);
+    nav.append(item);
+  }
+  switchTab(initialTab);
+}
+
+// ---------- settings · general ----------
+async function generalTab(): Promise<HTMLElement> {
+  const wrap = el('div');
+
+  const sec1 = stSection('外观');
+  const themeSel = el('select') as HTMLSelectElement;
+  themeSel.append(el('option', { value: 'dark', text: '深色' }), el('option', { value: 'light', text: '浅色' }));
+  themeSel.value = S.prefs.theme || 'dark';
+  themeSel.onchange = async () => {
+    S.prefs = await api.setPrefs({ theme: themeSel.value });
+    document.documentElement.setAttribute('data-theme', themeSel.value);
+  };
+  sec1.append(stFormRow('主题', themeSel));
+  wrap.append(sec1);
+
+  const sec2 = stSection('行为');
+  const trustCb = el('input', { type: 'checkbox' }) as HTMLInputElement;
+  trustCb.checked = !!S.prefs.trustProject;
+  trustCb.onchange = async () => {
+    S.prefs = await api.setPrefs({ trustProject: trustCb.checked });
+    toast(trustCb.checked ? '已开启：下次启动 pi 将自动信任项目本地配置（--approve）' : '已关闭自动信任', 'info');
+  };
+  sec2.append(
+    el('label', { class: 'toggle-row' }, trustCb, el('span', {}, el('span', { text: '自动信任项目配置 ' }), el('span', { class: 't-hint', text: '信任项目 .pi/ 目录中的扩展与设置；仅在打开可信项目时开启' }))),
+  );
+  wrap.append(sec2);
+
+  const sec3 = stSection('关于');
+  sec3.append(
+    stFormRow('PiCode 版本', el('span', { class: 'grow', text: S.appInfo.appVersion || '?' })),
+    stFormRow('pi 内核', el('span', { class: 'grow', text: `v${S.appInfo.piVersion || '?'}（已内置）` })),
+    stFormRow('数据目录', el('span', { class: 'grow mono', style: 'font-size:11.5px;word-break:break-all', text: S.appInfo.agentDir || '' })),
+  );
+  wrap.append(sec3);
+  return wrap;
+}
+
+// ---------- settings · model ----------
+async function modelTab(ctx: SettingsTabCtx): Promise<HTMLElement> {
   const cfg = await api.configRead();
   const configured = cfg.auth || {};
+  ctx.setBadge('model', String(Object.values(configured).filter((v: any) => v?.configured).length));
+
+  const wrap = el('div');
 
   // -- keys --
-  const sec1 = el('div', { class: 'settings-section' }, el('h4', { text: 'API 密钥（保存到 pi 的 auth.json，与命令行版 pi 通用）' }));
+  const sec1 = stSection('API 密钥', '保存到 pi 的 auth.json，与命令行版 pi 通用');
   const keyList = el('div');
   const renderKeys = () => {
     keyList.innerHTML = '';
     const entries = Object.entries(configured).filter(([, v]: any) => v?.configured);
+    ctx.setBadge('model', String(entries.length));
     if (!entries.length) keyList.append(el('div', { class: 'form-hint', text: '尚未配置任何密钥。' }));
     for (const [provider, v] of entries) {
       keyList.append(el('div', { class: 'key-row' },
@@ -1839,26 +1994,26 @@ async function openSettings(): Promise<void> {
   const keyInput = el('input', { type: 'password', class: 'grow', placeholder: '粘贴 API 密钥…', style: 'flex:1.5' }) as HTMLInputElement;
   const customInput = el('input', { type: 'text', class: 'hidden', placeholder: '供应商 ID（如 qwen、together…）', style: 'width:100%;margin-top:8px' }) as HTMLInputElement;
   sel.onchange = () => customInput.classList.toggle('hidden', sel.value !== '__custom');
-  const saveBtn = el('button', { class: 'btn primary', text: '保存密钥', onclick: async () => {
-    const key = keyInput.value.trim();
-    if (!key) return toast('请输入密钥', 'warning');
-    const provider = sel.value === '__custom' ? customInput.value.trim() : sel.value;
-    if (!provider) return toast('请输入供应商 ID', 'warning');
-    await api.configSetKey(provider, key);
-    keyInput.value = '';
-    (configured as any)[provider] = { configured: true, kind: 'api_key' };
-    renderKeys();
-    toast(`${provider} 密钥已保存`, 'success');
-    await refreshModels();
-  } });
   sec1.append(
-    el('div', { class: 'form-row' }, sel, keyInput, saveBtn),
+    el('div', { class: 'form-row' }, sel, keyInput, el('button', { class: 'btn primary', text: '保存密钥', onclick: async () => {
+      const key = keyInput.value.trim();
+      if (!key) return toast('请输入密钥', 'warning');
+      const provider = sel.value === '__custom' ? customInput.value.trim() : sel.value;
+      if (!provider) return toast('请输入供应商 ID', 'warning');
+      await api.configSetKey(provider, key);
+      keyInput.value = '';
+      (configured as any)[provider] = { configured: true, kind: 'api_key' };
+      renderKeys();
+      toast(`${provider} 密钥已保存`, 'success');
+      await refreshModels();
+    } })),
     customInput,
     el('div', { class: 'form-hint', text: '也可以改用环境变量（如 ANTHROPIC_API_KEY）：在此电脑的系统环境变量中设置后重启 PiCode 即可。' }),
   );
+  wrap.append(sec1);
 
-  // -- defaults --
-  const sec2 = el('div', { class: 'settings-section' }, el('h4', { text: '启动默认' }));
+  // -- default model --
+  const sec2 = stSection('默认模型', '新会话启动时使用的模型');
   const defModel = el('div', { class: 'form-hint', text: cfg.settings?.defaultModel ? `当前默认：${cfg.settings.defaultProvider || ''}/${cfg.settings.defaultModel}` : '尚未设置默认模型（pi 自动选择）' });
   sec2.append(
     defModel,
@@ -1869,43 +2024,315 @@ async function openSettings(): Promise<void> {
         defModel.textContent = `当前默认：${S.model.provider}/${S.model.id}`;
         toast('已保存默认模型', 'success');
       } }),
-      el('button', { class: 'btn', text: '选择默认模型…', onclick: async () => {
-        close();
-        await openModelPicker();
+      el('button', { class: 'btn', text: '选择默认模型…', onclick: () => openModelPicker() }),
+    ),
+  );
+  wrap.append(sec2);
+
+  // -- model list --
+  const sec3 = stSection('可用模型', '点击任意模型切换当前会话；「设默认」作用于新会话');
+  const browser = await buildModelBrowser();
+  sec3.append(browser.root);
+  wrap.append(sec3);
+
+  // -- default thinking level --
+  const sec4 = stSection('默认思考等级', '保存后对新会话生效');
+  const thinkSel = el('select') as HTMLSelectElement;
+  for (const lv of ['off', 'minimal', 'low', 'medium', 'high']) {
+    thinkSel.append(el('option', { value: lv, text: `${lv}（${thinkingLabel(lv)}）` }));
+  }
+  thinkSel.value = String(cfg.settings?.defaultThinkingLevel || 'medium');
+  thinkSel.onchange = async () => {
+    await api.configWriteSettings({ defaultThinkingLevel: thinkSel.value });
+    toast(`默认思考等级已保存：${thinkingLabel(thinkSel.value)}`, 'success');
+  };
+  sec4.append(stFormRow('思考等级', thinkSel));
+  wrap.append(sec4);
+  return wrap;
+}
+
+// ---------- settings · MCP ----------
+async function reloadMcpExtension(): Promise<void> {
+  if (S.phase !== 'ready') return;
+  if (!S.commands.some((c: any) => c.name === 'mcp-reload')) return;
+  try {
+    await cmd({ type: 'prompt', message: '/mcp-reload' }, 30000);
+    await refreshCommands();
+  } catch { /* pi will pick up config on restart anyway */ }
+}
+
+async function mcpTab(ctx: SettingsTabCtx): Promise<HTMLElement> {
+  const [cfg, status] = await Promise.all([api.mcpConfigRead(), api.mcpStatusRead()]);
+  const servers: Record<string, any> = cfg?.mcpServers || {};
+  ctx.setBadge('mcp', Object.keys(servers).length ? String(Object.keys(servers).length) : '');
+  const wrap = el('div');
+
+  // -- extension toggle --
+  const sec0 = stSection('MCP 扩展', 'PiCode 内置的 MCP 桥接扩展：把 MCP 服务器的工具接入 pi');
+  const enableCb = el('input', { type: 'checkbox' }) as HTMLInputElement;
+  enableCb.checked = S.prefs.mcpEnabled !== false;
+  enableCb.onchange = async () => {
+    S.prefs = await api.setPrefs({ mcpEnabled: enableCb.checked });
+    toast(enableCb.checked ? '已启用 MCP 扩展，重启 pi（或 /reload）后生效' : '已停用 MCP 扩展，重启 pi 后生效', 'info');
+  };
+  sec0.append(el('label', { class: 'toggle-row' }, enableCb, el('span', {}, el('span', { text: '在 pi 中加载 MCP 扩展 ' }), el('span', { class: 't-hint', text: '关闭后 pi 不再连接任何 MCP 服务器' }))));
+  const stSummary = (() => {
+    const srv: Record<string, any> = status?.servers || {};
+    const total = Object.keys(srv).length;
+    if (!total) return '当前没有运行中的 MCP 服务器';
+    const connected = Object.values(srv).filter((s: any) => s.state === 'connected').length;
+    const tools = Object.values(srv).reduce((n: number, s: any) => n + (s.toolCount || 0), 0);
+    return `已连接 ${connected}/${total} 台服务器 · ${tools} 个工具可用`;
+  })();
+  sec0.append(el('div', { class: 'form-hint', text: stSummary }));
+  sec0.append(el('div', { class: 'form-row' },
+    el('button', { class: 'btn', text: '重新加载 MCP', onclick: async () => {
+      toast('正在重载 MCP …', 'info');
+      await reloadMcpExtension();
+      toast('已触发重载，状态栏将显示最新连接数', 'success');
+    } }),
+    el('span', { class: 'dim', style: 'font-size:11.5px;align-self:center', text: '修改服务器配置后也会自动重连' }),
+  ));
+  wrap.append(sec0);
+
+  // -- server list --
+  const sec1 = stSection('服务器', 'stdio 服务器；与 Claude Desktop 的 mcpServers 配置格式兼容');
+  const listWrap = el('div');
+
+  const stateDot = (name: string): HTMLElement => {
+    const s = status?.servers?.[name];
+    const cls = !s ? 'off' : s.state === 'connected' ? 'ok' : s.state === 'connecting' ? 'warn' : 'err';
+    const dot = el('span', { class: `mc-dot ${cls}`, title: s?.state || '未连接' });
+    return dot;
+  };
+
+  const renderServers = () => {
+    listWrap.innerHTML = '';
+    const names = Object.keys(servers);
+    if (!names.length) {
+      listWrap.append(el('div', { class: 'p-empty', style: 'padding:18px' },
+        el('div', { text: '尚未配置 MCP 服务器' }),
+        el('div', { class: 'dim', style: 'font-size:11.5px;margin-top:6px', text: '添加一个 stdio 服务器（如 npx 启动的 MCP 工具）即可把它的工具提供给 pi 使用。' }),
+      ));
+      return;
+    }
+    for (const name of names) {
+      const c = servers[name] || {};
+      const s = status?.servers?.[name];
+      listWrap.append(el('div', { class: 'mcp-row' },
+        stateDot(name),
+        el('span', { class: 'mc-name', text: name }),
+        el('span', { class: 'mc-cmd', text: [c.command, ...(c.args || [])].join(' '), title: [c.command, ...(c.args || [])].join(' ') }),
+        el('span', { class: 'mc-tools', text: s?.toolCount ? `${s.toolCount} 工具` : '', title: (s?.tools || []).map((t: any) => t.name).join('\n') }),
+        el('span', { class: 'mc-state', text: s?.state === 'connected' ? '已连接' : s?.state === 'connecting' ? '连接中' : s?.state === 'error' ? '错误' : '未连接' }),
+        el('button', { class: 'btn small', text: '编辑', onclick: () => showForm(name) }),
+        el('button', { class: 'btn small danger', text: '删除', onclick: async () => {
+          if (!(await confirmModal('删除 MCP 服务器', `确定删除「${name}」吗？重载后其工具将不再可用。`, true))) return;
+          delete servers[name];
+          await api.mcpConfigWrite({ mcpServers: servers });
+          await reloadMcpExtension();
+          renderServers();
+          ctx.setBadge('mcp', Object.keys(servers).length ? String(Object.keys(servers).length) : '');
+          toast(`已删除 ${name}`, 'success');
+          setTimeout(() => { ctx.refresh().catch(() => {}); }, 3000);
+        } }),
+      ));
+    }
+  };
+  renderServers();
+  sec1.append(listWrap);
+
+  // -- add / edit form --
+  const form = el('div', { class: 'st-form hidden' });
+  let editingName: string | null = null;
+  const fName = el('input', { type: 'text', placeholder: '如 filesystem、github…' }) as HTMLInputElement;
+  const fCommand = el('input', { type: 'text', placeholder: '如 npx / node / uvx …' }) as HTMLInputElement;
+  const fArgs = el('textarea', { class: 'field mono-input', rows: 3, placeholder: '每行一个参数，如：\n-y\n@modelcontextprotocol/server-filesystem\nC:\\path' }) as HTMLTextAreaElement;
+  const fEnv = el('textarea', { class: 'field mono-input', rows: 2, placeholder: '每行一条 KEY=VALUE（可选）' }) as HTMLTextAreaElement;
+  const fCwd = el('input', { type: 'text', placeholder: '（可选）' }) as HTMLInputElement;
+  const grid = el('div', { class: 'st-form-grid' },
+    el('label', { text: '名称' }), fName,
+    el('label', { text: '命令' }), fCommand,
+    el('label', { text: '参数' }), fArgs,
+    el('label', { text: '环境变量' }), fEnv,
+    el('label', { text: '工作目录' }), fCwd,
+  );
+  const save = async (): Promise<void> => {
+    const name = fName.value.trim();
+    const command = fCommand.value.trim();
+    if (!name) return toast('请填写服务器名称', 'warning');
+    if (!command) return toast('请填写启动命令', 'warning');
+    if (!editingName && servers[name]) return toast(`已存在同名服务器「${name}」`, 'warning');
+    if (editingName && editingName !== name) delete servers[editingName];
+    const args = fArgs.value.split('\n').map((s) => s.trim()).filter(Boolean);
+    const env: Record<string, string> = {};
+    for (const line of fEnv.value.split('\n')) {
+      const kv = line.trim();
+      if (!kv) continue;
+      const eq = kv.indexOf('=');
+      if (eq > 0) env[kv.slice(0, eq).trim()] = kv.slice(eq + 1).trim();
+    }
+    const entry: any = { command };
+    if (args.length) entry.args = args;
+    if (Object.keys(env).length) entry.env = env;
+    if (fCwd.value.trim()) entry.cwd = fCwd.value.trim();
+    entry.enabled = true;
+    servers[name] = entry;
+    await api.mcpConfigWrite({ mcpServers: servers });
+    form.classList.add('hidden');
+    renderServers();
+    ctx.setBadge('mcp', Object.keys(servers).length ? String(Object.keys(servers).length) : '');
+    toast(`已保存 ${name}，正在重载 MCP …`, 'success');
+    await reloadMcpExtension();
+    // Extension notices the config change via its mtime poll (~2s); refresh
+    // once more so the row flips to 已连接 without a manual reopen.
+    setTimeout(() => { ctx.refresh().catch(() => {}); }, 3000);
+  };
+  const showForm = (name: string | null): void => {
+    editingName = name;
+    const c = name ? servers[name] || {} : {};
+    fName.value = name || '';
+    fCommand.value = c.command || '';
+    fArgs.value = (c.args || []).join('\n');
+    fEnv.value = Object.entries(c.env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+    fCwd.value = c.cwd || '';
+    fName.disabled = !!name;
+    form.classList.remove('hidden');
+    fName.focus();
+  };
+  form.append(
+    grid,
+    el('div', { class: 'form-row', style: 'margin:12px 0 0' },
+      el('button', { class: 'btn primary', text: '保存并重载', onclick: () => { save(); } }),
+      el('button', { class: 'btn', text: '取消', onclick: () => form.classList.add('hidden') }),
+    ),
+  );
+  sec1.append(form);
+  sec1.append(el('button', { class: 'btn', text: '＋ 添加服务器…', onclick: () => showForm(null) }));
+  wrap.append(sec1);
+
+  wrap.append(el('div', { class: 'form-hint', html: `配置保存在 <span class="mono">mcp.json</span>（pi 数据目录），连接状态由扩展实时写入 <span class="mono">mcp-status.json</span>。也可以在会话里输入 <span class="mono">/mcp</span> 查看状态、<span class="mono">/mcp-reload</span> 手动重载。` }));
+  return wrap;
+}
+
+// ---------- settings · skills ----------
+async function skillsTab(ctx: SettingsTabCtx): Promise<HTMLElement> {
+  const skills = (await api.skillsList(S.project || undefined)) || [];
+  const wrap = el('div');
+
+  const sec1 = stSection('已安装的技能', '技能是按需加载的能力包：pi 启动时只读取描述，任务匹配时才加载全文');
+  const search = el('input', { type: 'text', class: 'search-box', placeholder: '搜索技能…' }) as HTMLInputElement;
+  const listWrap = el('div');
+
+  const render = () => {
+    listWrap.innerHTML = '';
+    const q = search.value.trim().toLowerCase();
+    const rows = skills.filter((s: any) => !q || s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q));
+    ctx.setBadge('skills', skills.length ? String(skills.length) : '');
+    if (!rows.length) {
+      listWrap.append(el('div', { class: 'p-empty', style: 'padding:18px' },
+        el('div', { text: skills.length ? '没有匹配的技能' : '尚未安装任何技能' }),
+      ));
+      return;
+    }
+    for (const s of rows) {
+      listWrap.append(el('div', { class: 'res-row', title: s.path, onclick: () => api.openPath(s.path) },
+        el('div', { class: 'rs-main' },
+          el('div', { class: 'rs-name', text: s.name }),
+          el('div', { class: 'rs-desc', text: s.description || '（无描述）' }),
+          el('div', { class: 'rs-path mono', text: s.path }),
+        ),
+        el('span', { class: `tag-chip ${s.scope === 'project' ? 'is-project' : ''}`, text: s.scope === 'project' ? '项目' : '用户' }),
+      ));
+    }
+  };
+  search.oninput = render;
+  render();
+  sec1.append(search, listWrap);
+  sec1.append(el('div', { class: 'form-row' },
+    el('button', { class: 'btn', text: '打开用户技能目录', onclick: () => api.openPath(`${S.appInfo.agentDir}\\skills`) }),
+  ));
+  wrap.append(sec1);
+
+  wrap.append(el('div', { class: 'form-hint', html: `安装方法：把含 <span class="mono">SKILL.md</span> 的目录放入 <span class="mono">~/.pi/agent/skills</span>（全局）或项目 <span class="mono">.pi/skills</span>（仅当前项目），然后 <span class="mono">/reload</span> 重启 pi。技能会注册为 <span class="mono">/skill:名称</span> 指令，也可被 pi 自动调用。` }));
+  return wrap;
+}
+
+// ---------- settings · extensions ----------
+async function extensionsTab(ctx: SettingsTabCtx): Promise<HTMLElement> {
+  await refreshCommands();
+  const files = (await api.extensionsList(S.project || undefined)) || [];
+  ctx.setBadge('extensions', files.length ? String(files.length) : '');
+  const wrap = el('div');
+
+  const sec1 = stSection('已加载的命令', '来自扩展、提示模板与技能（/reload 后重新统计）');
+  if (!S.commands.length) {
+    sec1.append(el('div', { class: 'form-hint', text: '当前没有加载任何扩展命令、提示模板或技能指令。' }));
+  }
+  const groups = new Map<string, any[]>();
+  for (const c of S.commands) {
+    const tag = c.source === 'skill' ? '技能指令' : c.source === 'prompt' ? '提示模板' : '扩展命令';
+    if (!groups.has(tag)) groups.set(tag, []);
+    groups.get(tag)!.push(c);
+  }
+  for (const [tag, cmds] of groups) {
+    sec1.append(el('h4', { style: 'font-size:11.5px;color:var(--text-faint);margin:12px 0 6px', text: tag }));
+    for (const c of cmds) {
+      sec1.append(el('div', { class: 'key-row' },
+        el('span', { class: 'k-provider', text: `/${c.name}` }),
+        el('span', { style: 'flex:1;font-size:12px;color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap', text: c.description || c.sourceInfo?.path || '' }),
+        el('span', { class: 'k-ok', text: c.sourceInfo?.scope === 'project' ? '项目' : '用户' }),
+      ));
+    }
+  }
+  wrap.append(sec1);
+
+  const sec2 = stSection('扩展文件', '扩展是 pi 在启动时加载的 TypeScript / JavaScript 文件，可以注册工具、指令与快捷键');
+  if (!files.length) {
+    sec2.append(el('div', { class: 'form-hint', text: '尚未安装任何扩展文件。' }));
+  }
+  for (const f of files) {
+    sec2.append(el('div', { class: 'res-row', title: f.path, onclick: () => api.showItem(f.path) },
+      el('div', { class: 'rs-main' },
+        el('div', { class: 'rs-name', text: f.name }),
+        el('div', { class: 'rs-path mono', text: f.path }),
+      ),
+      el('span', { class: `tag-chip ${f.scope === 'project' ? 'is-project' : ''}`, text: f.scope === 'project' ? '项目' : '用户' }),
+    ));
+  }
+  sec2.append(el('div', { class: 'form-row' },
+    el('button', { class: 'btn', text: '打开用户扩展目录', onclick: () => api.openPath(`${S.appInfo.agentDir}\\extensions`) }),
+    el('button', { class: 'btn', text: '打开 pi 配置目录', onclick: () => api.openPath(S.appInfo.agentDir) }),
+  ));
+  wrap.append(sec2);
+  return wrap;
+}
+
+// ---------- settings · advanced ----------
+async function advancedTab(): Promise<HTMLElement> {
+  const wrap = el('div');
+  const sec1 = stSection('诊断');
+  sec1.append(
+    el('div', { class: 'form-row' },
+      el('button', { class: 'btn', text: '查看运行日志', onclick: () => openLogModal() }),
+      el('button', { class: 'btn', text: '重启 pi（重新加载配置与扩展）', onclick: async () => {
+        document.querySelectorAll('.modal-mask').forEach((n) => n.remove());
+        modalStack = 0;
+        await doReload();
       } }),
     ),
   );
+  wrap.append(sec1);
 
-  // -- appearance --
-  const sec3 = el('div', { class: 'settings-section' }, el('h4', { text: '外观' }));
-  const themeSel = el('select') as HTMLSelectElement;
-  themeSel.append(el('option', { value: 'dark', text: '深色' }), el('option', { value: 'light', text: '浅色' }));
-  themeSel.value = S.prefs.theme || 'dark';
-  themeSel.onchange = async () => {
-    S.prefs = await api.setPrefs({ theme: themeSel.value });
-    document.documentElement.setAttribute('data-theme', themeSel.value);
-  };
-  sec3.append(el('div', { class: 'form-row' }, el('label', { text: '主题' }), themeSel));
-
-  // -- advanced --
-  const sec4 = el('div', { class: 'settings-section' }, el('h4', { text: '高级' }));
-  const trustCb = el('input', { type: 'checkbox' }) as HTMLInputElement;
-  trustCb.checked = !!S.prefs.trustProject;
-  trustCb.onchange = async () => {
-    S.prefs = await api.setPrefs({ trustProject: trustCb.checked });
-    toast(trustCb.checked ? '已开启：下次启动 pi 将自动信任项目本地配置（--approve）' : '已关闭自动信任', 'info');
-  };
-  sec4.append(
-    el('label', { class: 'toggle-row' }, trustCb, el('span', {}, el('span', { text: '自动信任项目配置 ' }), el('span', { class: 't-hint', text: '信任项目 .pi/ 目录中的扩展与设置；仅在打开可信项目时开启' }))),
+  const sec2 = stSection('数据目录');
+  sec2.append(
     el('div', { class: 'form-row' },
       el('button', { class: 'btn', text: '打开 pi 数据目录', onclick: () => api.openPath(S.appInfo.agentDir) }),
-      el('button', { class: 'btn', text: '查看运行日志', onclick: () => openLogModal() }),
-      el('button', { class: 'btn', text: '重启 pi', onclick: async () => { close(); await doReload(); } }),
     ),
-    el('div', { class: 'form-hint', html: `自定义模型端点（Ollama / LM Studio / vLLM / 各类兼容接口）：编辑 <span class="mono">models.json</span>（位于 pi 数据目录），或在 pi 数据目录安装扩展与技能。数据目录：<span class="mono">${escapeText(S.appInfo.agentDir || '')}</span>` }),
+    el('div', { class: 'form-hint', html: `自定义模型端点（Ollama / LM Studio / vLLM / 各类兼容接口）：编辑 <span class="mono">models.json</span>（位于 pi 数据目录）。MCP 服务器、技能与扩展也安装在这里：<span class="mono">${escapeText(S.appInfo.agentDir || '')}</span>` }),
   );
-
-  body.append(sec1, sec2, sec3, sec4);
+  wrap.append(sec2);
+  return wrap;
 }
 
 async function openLogModal(): Promise<void> {
